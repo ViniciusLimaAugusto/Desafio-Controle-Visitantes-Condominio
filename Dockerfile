@@ -21,6 +21,7 @@ RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home a
     && install -d -o app -g app /data
 COPY --from=dependencies /app/.venv /app/.venv
 COPY app/ app/
+RUN chmod -R a+rX /app/app
 
 USER 10001:10001
 EXPOSE 8000
