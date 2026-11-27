@@ -1,44 +1,53 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
-from .. import crud, schemas, models
-from ..database import get_db
+from fastapi import APIRouter, HTTPException, Response
+from sqlalchemy import select
 
-router = APIRouter(
-    prefix="/visitantes",
-    tags=["Visitantes"],
-    responses={404: {"description": "Visitante não encontrado"}},
-)
+from .. import models, schemas
+from . import Database, Limit, Offset, commit
 
-@router.post("/", response_model=schemas.Visitante, status_code=status.HTTP_201_CREATED)
-def create_visitante(visitante: schemas.VisitanteCreate, db: Session = Depends(get_db)):
-    db_visitante = crud.get_visitante_by_documento(db, documento=visitante.documento)
-    if db_visitante:
-        raise HTTPException(status_code=400, detail="Visitante com este documento já cadastrado")
-    return crud.create_visitante(db=db, visitante=visitante)
+router = APIRouter(prefix="/visitantes", tags=["Visitors"])
+document_conflict = {"SQLITE_CONSTRAINT_UNIQUE": "Visitor document already registered."}
 
-@router.get("/", response_model=List[schemas.Visitante])
-def read_visitantes(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    visitantes = crud.get_visitantes(db, skip=skip, limit=limit)
-    return visitantes
+
+@router.post("/", response_model=schemas.Visitante, status_code=201)
+def create_visitor(visitor: schemas.VisitanteCreate, db: Database) -> models.Visitante:
+    record = models.Visitante(**visitor.model_dump())
+    db.add(record)
+    commit(db, document_conflict)
+    return record
+
+
+@router.get("/", response_model=list[schemas.Visitante])
+def list_visitors(
+    db: Database, skip: Offset = 0, limit: Limit = 100
+) -> list[models.Visitante]:
+    statement = (
+        select(models.Visitante).order_by(models.Visitante.id).offset(skip).limit(limit)
+    )
+    return list(db.scalars(statement))
+
 
 @router.get("/{visitante_id}", response_model=schemas.Visitante)
-def read_visitante(visitante_id: int, db: Session = Depends(get_db)):
-    db_visitante = crud.get_visitante(db, visitante_id=visitante_id)
-    if db_visitante is None:
-        raise HTTPException(status_code=404, detail="Visitante não encontrado")
-    return db_visitante
+def read_visitor(visitante_id: schemas.ResourceId, db: Database) -> models.Visitante:
+    visitor = db.get(models.Visitante, visitante_id)
+    if visitor is None:
+        raise HTTPException(404, "Visitor not found.")
+    return visitor
+
 
 @router.put("/{visitante_id}", response_model=schemas.Visitante)
-def update_visitante(visitante_id: int, visitante: schemas.VisitanteUpdate, db: Session = Depends(get_db)):
-    db_visitante = crud.update_visitante(db, visitante_id, visitante)
-    if db_visitante is None:
-        raise HTTPException(status_code=404, detail="Visitante não encontrado")
-    return db_visitante
+def update_visitor(
+    visitante_id: schemas.ResourceId, visitor: schemas.VisitanteCreate, db: Database
+) -> models.Visitante:
+    record = read_visitor(visitante_id, db)
+    record.nome = visitor.nome
+    record.documento = visitor.documento
+    record.telefone = visitor.telefone
+    commit(db, document_conflict)
+    return record
 
-@router.delete("/{visitante_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_visitante(visitante_id: int, db: Session = Depends(get_db)):
-    success = crud.delete_visitante(db, visitante_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Visitante não encontrado")
-    return {"message": "Visitante deletado com sucesso"}
+
+@router.delete("/{visitante_id}", status_code=204)
+def delete_visitor(visitante_id: schemas.ResourceId, db: Database) -> Response:
+    db.delete(read_visitor(visitante_id, db))
+    commit(db, {"SQLITE_CONSTRAINT_FOREIGNKEY": "Visitor has access history."})
+    return Response(status_code=204)
