@@ -1,77 +1,86 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
-from .. import crud, schemas, models
-from ..database import get_db
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-router = APIRouter(
-    prefix="/condominios",
-    tags=["Condomínios e Unidades"],
-    responses={404: {"description": "Condomínio não encontrado"}},
-)
+from .. import models, schemas
+from . import Database, Limit, Offset, commit
 
-@router.post(
-    "/", response_model=schemas.Condominio, status_code=status.HTTP_201_CREATED
-)
-def create_condominio(
-    condominio: schemas.CondominioCreate, db: Session = Depends(get_db)
-):
-    return crud.create_condominio(db=db, condominio=condominio)
+router = APIRouter(prefix="/condominios", tags=["Condominiums and units"])
 
 
-@router.get("/", response_model=List[schemas.Condominio])
-def read_condominios(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    condominios = crud.get_condominios(db, skip=skip, limit=limit)
-    return condominios
+@router.post("/", response_model=schemas.Condominio, status_code=201)
+def create_condominium(
+    condominium: schemas.CondominioCreate, db: Database
+) -> models.Condominio:
+    record = models.Condominio(**condominium.model_dump())
+    db.add(record)
+    commit(db, {"SQLITE_CONSTRAINT_UNIQUE": "Condominium name already registered."})
+    return record
+
+
+@router.get("/", response_model=list[schemas.Condominio])
+def list_condominiums(
+    db: Database, skip: Offset = 0, limit: Limit = 100
+) -> list[models.Condominio]:
+    statement = (
+        select(models.Condominio)
+        .options(selectinload(models.Condominio.unidades))
+        .order_by(models.Condominio.id)
+        .offset(skip)
+        .limit(limit)
+    )
+    return list(db.scalars(statement))
+
+
+@router.get("/relacao/unidades", response_model=list[schemas.Condominio])
+def list_condominium_units(db: Database) -> list[models.Condominio]:
+    statement = (
+        select(models.Condominio)
+        .options(selectinload(models.Condominio.unidades))
+        .order_by(models.Condominio.id)
+    )
+    return list(db.scalars(statement))
 
 
 @router.get("/{condominio_id}", response_model=schemas.Condominio)
-def read_condominio(condominio_id: int, db: Session = Depends(get_db)):
-    db_condominio = crud.get_condominio(db, condominio_id=condominio_id)
-    if db_condominio is None:
-        raise HTTPException(status_code=404, detail="Condomínio não encontrado")
-    return db_condominio
+def read_condominium(
+    condominio_id: schemas.ResourceId, db: Database
+) -> models.Condominio:
+    record = db.get(models.Condominio, condominio_id)
+    if record is None:
+        raise HTTPException(404, "Condominium not found.")
+    return record
 
-@router.get("/relacao/unidades", response_model=List[schemas.Condominio])
-def get_condominios_com_unidades(db: Session = Depends(get_db)):
-    """
-    Mostra a relação entre condomínios e suas unidades.
-    Retorna uma lista de condomínios, onde cada condomínio inclui suas unidades associadas.
-    """
-    condominios_com_unidades = db.query(models.Condominio).all()
-    for condominio in condominios_com_unidades:
-        condominio.unidades # Isso força o carregamento das unidades
-    return condominios_com_unidades
 
-@router.get("/{condominio_id}/unidades", response_model=List[schemas.Unidade])
-def read_unidades_por_condominio(
-    condominio_id: int, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
-):
-    unidades = crud.get_unidades_por_condominio(
-        db, condominio_id=condominio_id, skip=skip, limit=limit
+@router.get("/{condominio_id}/unidades", response_model=list[schemas.Unidade])
+def list_units(
+    condominio_id: schemas.ResourceId,
+    db: Database,
+    skip: Offset = 0,
+    limit: Limit = 100,
+) -> list[models.Unidade]:
+    read_condominium(condominio_id, db)
+    statement = (
+        select(models.Unidade)
+        .options(selectinload(models.Unidade.movimentacoes))
+        .where(models.Unidade.condominio_id == condominio_id)
+        .order_by(models.Unidade.id)
+        .offset(skip)
+        .limit(limit)
     )
-    if not unidades:
-        raise HTTPException(
-            status_code=404,
-            detail="Nenhuma unidade encontrada para este condomínio ou condomínio inexistente",
-        )
-    return unidades
+    return list(db.scalars(statement))
 
 
 @router.post(
-    "/{condominio_id}/unidades/",
-    response_model=schemas.Unidade,
-    status_code=status.HTTP_201_CREATED,
+    "/{condominio_id}/unidades/", response_model=schemas.Unidade, status_code=201
 )
-def create_unidade_para_condominio(
-    condominio_id: int, unidade: schemas.UnidadeCreate, db: Session = Depends(get_db)
-):
+def create_unit(
+    condominio_id: schemas.ResourceId, unidade: schemas.UnidadeCreate, db: Database
+) -> models.Unidade:
     if unidade.condominio_id != condominio_id:
-        raise HTTPException(
-            status_code=400,
-            detail="ID do condomínio na URL e no corpo da requisição não correspondem.",
-        )
-    db_condominio = crud.get_condominio(db, condominio_id=condominio_id)
-    if db_condominio is None:
-        raise HTTPException(status_code=404, detail="Condomínio não encontrado")
-    return crud.create_unidade(db=db, unidade=unidade)
+        raise HTTPException(400, "Condominium IDs in the URL and body must match.")
+    read_condominium(condominio_id, db)
+    record = models.Unidade(**unidade.model_dump())
+    db.add(record)
+    commit(db, {"SQLITE_CONSTRAINT_FOREIGNKEY": "Condominium no longer exists."})
+    return record

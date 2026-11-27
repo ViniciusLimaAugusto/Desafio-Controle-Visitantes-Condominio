@@ -1,0 +1,12 @@
+services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
+    volumes:
+      - visitor-data:/data
+
+volumes:
+  visitor-data:

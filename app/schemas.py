@@ -1,100 +1,86 @@
-
-from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, List, ForwardRef
+from typing import Annotated
 
-Visitante = ForwardRef("Visitante")
-Condominio = ForwardRef("Condominio")
-Unidade = ForwardRef("Unidade")
-Movimentacao = ForwardRef("Movimentacao")
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-class VisitanteBase(BaseModel):
-    nome: str = Field(..., example="João Silva")
-    documento: str = Field(..., example="123.456.789-00")
-    telefone: Optional[str] = Field(None, example="(99) 99999-9999")
+ResourceId = Annotated[int, Field(gt=0, le=2**63 - 1)]
 
-class VisitanteCreate(VisitanteBase):
-    pass
 
-class VisitanteUpdate(VisitanteBase):
-    pass
+class Input(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
 
-class VisitanteOnly(VisitanteBase):
+
+class Output(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VisitanteCreate(Input):
+    nome: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    documento: Annotated[str, StringConstraints(min_length=1, max_length=40)]
+    telefone: Annotated[str, StringConstraints(min_length=1, max_length=40)] | None = (
+        None
+    )
+
+
+class VisitorSummary(Output):
     id: int
-    class Config:
-        from_attributes = True
-
-class Visitante(VisitanteOnly):
-    pass
+    nome: str
 
 
+class Visitante(VisitorSummary):
+    documento: str
+    telefone: str | None
 
-class CondominioBase(BaseModel):
-    nome: str = Field(..., example="Condomínio Residencial Sol")
-    endereco: str = Field(..., example="Rua das Flores, 123 - Centro")
 
-class CondominioCreate(CondominioBase):
-    pass
+class CondominioCreate(Input):
+    nome: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    endereco: Annotated[str, StringConstraints(min_length=1, max_length=240)]
 
-class CondominioOnly(CondominioBase):
+
+class CondominiumSummary(Output):
     id: int
-    class Config:
-        from_attributes = True
-
-class Condominio(CondominioOnly):
-    unidades: List[ForwardRef("UnidadeOnly")] = []
-    class Config:
-        from_attributes = True
+    nome: str
+    endereco: str
 
 
-class UnidadeBase(BaseModel):
-    numero: str = Field(..., example="101")
-    bloco: Optional[str] = Field(None, example="A")
-    condominio_id: int = Field(..., example=1)
+class UnidadeCreate(Input):
+    numero: Annotated[str, StringConstraints(min_length=1, max_length=40)]
+    bloco: Annotated[str, StringConstraints(min_length=1, max_length=40)] | None = None
+    condominio_id: ResourceId
 
-class UnidadeCreate(UnidadeBase):
-    pass
 
-class UnidadeOnly(UnidadeBase):
+class UnitSummary(Output):
     id: int
-    class Config:
-        from_attributes = True
-
-class Unidade(UnidadeOnly):
-    condominio: Optional[CondominioOnly] = None
-    movimentacoes: List[ForwardRef("MovimentacaoOnly")] = []
-    class Config:
-        from_attributes = True
+    numero: str
+    bloco: str | None
+    condominio_id: int
 
 
-class MovimentacaoBase(BaseModel):
-    visitante_id: int = Field(..., example=1)
-    unidade_id: int = Field(..., example=1)
-    observacoes: Optional[str] = Field(None, example="Entrega de encomenda")
+class Condominio(CondominiumSummary):
+    unidades: list[UnitSummary] = Field(default_factory=list)
 
-class MovimentacaoCreate(MovimentacaoBase):
-    pass
 
-class MovimentacaoUpdate(BaseModel):
-    data_hora_saida: Optional[datetime] = Field(None, example=datetime.now())
-    observacoes: Optional[str] = Field(None, example="Visitante saiu com sucesso.")
-    ativa: Optional[bool] = Field(None, example=False)
+class MovimentacaoCreate(Input):
+    visitante_id: ResourceId
+    unidade_id: ResourceId
+    observacoes: Annotated[str, StringConstraints(max_length=500)] | None = None
 
-class MovimentacaoOnly(MovimentacaoBase):
+
+class MovementSummary(Output):
     id: int
+    visitante_id: int
+    unidade_id: int
+    observacoes: str | None
     data_hora_entrada: datetime
-    data_hora_saida: Optional[datetime] = None
+    data_hora_saida: datetime | None
     ativa: bool
-    class Config:
-        from_attributes = True
 
-class Movimentacao(MovimentacaoOnly):
-    visitante: Optional[VisitanteOnly] = None
-    unidade: Optional[UnidadeOnly] = None
-    class Config:
-        from_attributes = True
 
-Visitante.model_rebuild()
-Condominio.model_rebuild()
-Unidade.model_rebuild()
-Movimentacao.model_rebuild()
+class Movimentacao(MovementSummary):
+    visitante: VisitorSummary
+    unidade: UnitSummary
+
+
+class Unidade(UnitSummary):
+    condominio: CondominiumSummary
+    movimentacoes: list[MovementSummary] = Field(default_factory=list)

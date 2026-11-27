@@ -1,41 +1,66 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
-from .. import crud, schemas, models
-from ..database import get_db
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
 
-router = APIRouter(
-    prefix="/controle-acesso",
-    tags=["Controle de Acesso"],
-    responses={404: {"description": "Movimentação não encontrada"}},
-)
+from .. import crud, models, schemas
+from . import Database, Limit, Offset
 
-@router.post("/entrada", response_model=schemas.Movimentacao, status_code=status.HTTP_201_CREATED)
-def liberar_entrada_visitante(movimentacao: schemas.MovimentacaoCreate, db: Session = Depends(get_db)):
-    db_visitante = crud.get_visitante(db, movimentacao.visitante_id)
-    if not db_visitante:
-        raise HTTPException(status_code=404, detail="Visitante não encontrado")
+router = APIRouter(prefix="/controle-acesso", tags=["Access control"])
 
-    db_unidade = crud.get_unidade(db, movimentacao.unidade_id)
-    if not db_unidade:
-        raise HTTPException(status_code=404, detail="Unidade não encontrada")
 
-    db_movimentacao = crud.create_movimentacao_entrada(db=db, movimentacao=movimentacao)
-    if db_movimentacao is None:
-        raise HTTPException(status_code=400, detail="Já existe uma entrada ativa para este visitante nesta unidade.")
-    return db_movimentacao
+@router.post("/entrada", response_model=schemas.Movimentacao, status_code=201)
+def register_entry(
+    entry: schemas.MovimentacaoCreate, db: Database
+) -> models.Movimentacao:
+    if db.get(models.Visitante, entry.visitante_id) is None:
+        raise HTTPException(404, "Visitor not found.")
+    if db.get(models.Unidade, entry.unidade_id) is None:
+        raise HTTPException(404, "Unit not found.")
+    try:
+        movement = crud.record_entry(db, entry)
+    except IntegrityError as error:
+        db.rollback()
+        if (
+            getattr(error.orig, "sqlite_errorname", "")
+            == "SQLITE_CONSTRAINT_FOREIGNKEY"
+        ):
+            raise HTTPException(409, "Visitor or unit no longer exists.") from error
+        raise
+    if movement is None:
+        raise HTTPException(409, "Visitor already has an active entry for this unit.")
+    return movement
+
 
 @router.put("/saida/{movimentacao_id}", response_model=schemas.Movimentacao)
-def realizar_baixa_saida_visitante(movimentacao_id: int, db: Session = Depends(get_db)):
-    db_movimentacao = crud.update_movimentacao_saida(db, movimentacao_id)
-    if db_movimentacao is None:
-        raise HTTPException(status_code=404, detail="Movimentação não encontrada ou já finalizada.")
-    return db_movimentacao
+def register_exit(
+    movimentacao_id: schemas.ResourceId, db: Database
+) -> models.Movimentacao:
+    movement = crud.record_exit(db, movimentacao_id)
+    if movement is not None:
+        return movement
+    if db.get(models.Movimentacao, movimentacao_id) is None:
+        raise HTTPException(404, "Movement not found.")
+    raise HTTPException(409, "Movement has already been closed.")
 
-@router.get("/unidades/{unidade_id}/movimentacoes", response_model=List[schemas.Movimentacao])
-def listar_movimentacoes_por_unidade(unidade_id: int, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    db_unidade = crud.get_unidade(db, unidade_id)
-    if not db_unidade:
-        raise HTTPException(status_code=404, detail="Unidade não encontrada")
-    movimentacoes = crud.get_movimentacoes_por_unidade(db, unidade_id=unidade_id, skip=skip, limit=limit)
-    return movimentacoes
+
+@router.get(
+    "/unidades/{unidade_id}/movimentacoes", response_model=list[schemas.Movimentacao]
+)
+def list_history(
+    unidade_id: schemas.ResourceId, db: Database, skip: Offset = 0, limit: Limit = 100
+) -> list[models.Movimentacao]:
+    if db.get(models.Unidade, unidade_id) is None:
+        raise HTTPException(404, "Unit not found.")
+    statement = (
+        select(models.Movimentacao)
+        .options(
+            joinedload(models.Movimentacao.visitante),
+            joinedload(models.Movimentacao.unidade),
+        )
+        .where(models.Movimentacao.unidade_id == unidade_id)
+        .order_by(models.Movimentacao.id)
+        .offset(skip)
+        .limit(limit)
+    )
+    return list(db.scalars(statement))
